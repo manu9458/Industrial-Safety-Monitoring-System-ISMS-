@@ -89,43 +89,67 @@ class SurveillanceSystem:
         # --- PHASE 3: Safety Helmet Verification ---
         helmets = []
         if self.ppe_active:
-            ppe_results = self.ppe_model(frame, stream=True, conf=0.5, verbose=False)
+            # High confidence to reduce false positives
+            ppe_results = self.ppe_model(frame, stream=True, conf=0.7, verbose=False)
             for r in ppe_results:
                 for box in r.boxes:
                     cls_name = self.ppe_model.names[int(box.cls[0])]
                     if "hat" in cls_name.lower() or "helmet" in cls_name.lower():
                         helmets.append(list(map(int, box.xyxy[0])))
 
-
         # --- PHASE 4: Logic & Alerts ---
         violation_found = False
         roi_violation = False
         
-        for px1, py1, px2, py2 in persons:
-            # Check ROI Violation (based on feet position)
+        # 4a. Match Helmets to Persons (Greedy Assignment)
+        # Avoids one helmet validating multiple people in a crowd
+        matches = [] # (person_idx, helmet_idx, distance)
+        
+        for p_i, (px1, py1, px2, py2) in enumerate(persons):
+            # Check ROI Violation
             feet_point = (int((px1 + px2) / 2), py2)
             if cv2.pointPolygonTest(roi_points, feet_point, False) >= 0:
                 roi_violation = True
                 cv2.circle(annotated_frame, feet_point, 5, (0, 0, 255), -1)
 
-            has_helmet = False
-
-            head_y_limit = py1 + (py2 - py1) // 3
+            # Helmet Matching Prep
+            p_center_x = (px1 + px2) // 2
+            p_head_y = py1 # Top of bounding box
             
-            for hx1, hy1, hx2, hy2 in helmets:
-                h_center_x = (hx1 + hx2) // 2
-                h_center_y = (hy1 + hy2) // 2
+            for h_i, (hx1, hy1, hx2, hy2) in enumerate(helmets):
+                 h_center_x = (hx1 + hx2) // 2
+                 h_center_y = (hy1 + hy2) // 2
+                 
+                 # Check if helmet is roughly within the person's head region
+                 # Expanded range slightly for stability
+                 if (px1 - 20 < h_center_x < px2 + 20) and \
+                    (py1 - 60 < h_center_y < py1 + (py2 - py1)//3):
+                     
+                     # Calculate distance (prefer closer matches)
+                     dist = abs(p_center_x - h_center_x) + abs(p_head_y - h_center_y)
+                     matches.append((p_i, h_i, dist))
+        
+        # Sort matches by distance (closest pairs first)
+        matches.sort(key=lambda x: x[2])
+        
+        person_has_helmet = [False] * len(persons)
+        used_helmets = set()
+        
+        for p_i, h_i, dist in matches:
+            if not person_has_helmet[p_i] and h_i not in used_helmets:
+                person_has_helmet[p_i] = True
+                used_helmets.add(h_i)
                 
-                if (px1 < h_center_x < px2) and (py1 - 50 < h_center_y < head_y_limit):
-                    has_helmet = True
-                    cv2.rectangle(annotated_frame, (hx1, hy1), (hx2, hy2), (0, 255, 0), 2)
-                    break
-            
-            if has_helmet:
+                # Draw Helmet Box (Green)
+                hx1, hy1, hx2, hy2 = helmets[h_i]
+                cv2.rectangle(annotated_frame, (hx1, hy1), (hx2, hy2), (0, 255, 0), 2)
+
+        # 4b. Draw Person Status
+        for i, (px1, py1, px2, py2) in enumerate(persons):
+            if person_has_helmet[i]:
                 cv2.putText(annotated_frame, "SAFE", (px1, py1-10), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
                 cv2.rectangle(annotated_frame, (px1, py1), (px2, py2), (0, 255, 0), 2)
             else:
-                # UNSAFE
                 violation_found = True
                 cv2.putText(annotated_frame, "NO HELMET", (px1, py1-10), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 2)
                 cv2.rectangle(annotated_frame, (px1, py1), (px2, py2), (0, 0, 255), 3)
@@ -134,48 +158,50 @@ class SurveillanceSystem:
         
         # Priority: ROI Violation > No Helmet
         if roi_violation:
-            self.violation_count = min(30, self.violation_count + 2) # Fast increment
-            status_text = "ALERT: RESTRICTED ZONE"
-            status_color = (0, 0, 255)
+            self.violation_count = min(30, self.violation_count + 2)
             
         elif not persons:
             self.violation_count = 0
             
         elif violation_found:
-            self.violation_count = min(30, self.violation_count + 1) # Cap at 30 to prevent stuck alerts
+            self.violation_count = min(30, self.violation_count + 1)
         else:
-            self.violation_count = max(0, self.violation_count - 2) # Recover faster (decrement by 2)
+            self.violation_count = max(0, self.violation_count - 2)
         
-        status_text = "Status: Monitoring"
-        status_color = (0, 255, 0)
+        # Status Text Logic (Support Multiple Messages)
+        status_lines = []
+        
+        if roi_violation:
+             status_lines.append(("ALERT: RESTRICTED ZONE", (0, 0, 255)))
+             
+        if self.violation_count > self.alert_limit:
+             status_lines.append(("ALERT: SAFETY VIOLATION", (0, 0, 255)))
+             
+        if not status_lines:
+             status_lines.append(("Status: Monitoring", (0, 255, 0)))
 
+        # Trigger Actions
         if self.violation_count > self.alert_limit or roi_violation:
-            status_color = (0, 0, 255)
-            
-            if roi_violation:
-                status_text = "ALERT: RESTRICTED ZONE"
-                violation_type = "Restricted Zone Violation"
-            else:
-                status_text = "ALERT: SAFETY VIOLATION"
-                violation_type = "No Helmet Detected"
+            violation_type = "Restricted Zone Violation" if roi_violation else "No Helmet Detected"
 
             # 1. Log to CSV
             if self.frame_count % 60 == 0:
                 self.logger.log(len(persons), violation_type)
             
-            # 2. TRIGGER GEMINI AI (Context-Aware Voice Warning)
-            # We send the RAW frame (without boxes) so AI detects better
+            # 2. TRIGGER GEMINI AI
             trigger_msg = f"High Priority: {violation_type}"
             self.ai.analyze_scene(frame, trigger_reason=trigger_msg)
 
-        # Complex Hazard Check (Routine Scan every 15 seconds)
-        # This handles "Smoking", "Fire", "Blocked Path" which YOLO might miss
+        # Complex Hazard Check
         if time.time() - self.last_routine_check > 15.0:
             self.ai.analyze_scene(frame, trigger_reason="Routine General Hazard Scan")
             self.last_routine_check = time.time()
 
-        # UI
-        cv2.putText(annotated_frame, status_text, (20, 40), cv2.FONT_HERSHEY_SIMPLEX, 1, status_color, 2)
+        # UI - Draw Multiline Status
+        start_y = 40
+        for text, color in status_lines:
+            cv2.putText(annotated_frame, text, (20, start_y), cv2.FONT_HERSHEY_SIMPLEX, 1, color, 2)
+            start_y += 40
         
         # Cleanup
 
