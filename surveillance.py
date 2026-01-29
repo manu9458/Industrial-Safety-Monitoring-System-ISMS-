@@ -92,10 +92,14 @@ class SurveillanceSystem:
                 cv2.rectangle(annotated_frame, (px1, py1), (px2, py2), (0, 0, 255), 3)
 
         # Violation Logic
-        if violation_found:
-            self.violation_count += 1
+        # Violation Logic
+        if not persons:
+            self.violation_count = 0
+            
+        elif violation_found:
+            self.violation_count = min(30, self.violation_count + 1) # Cap at 30 to prevent stuck alerts
         else:
-            self.violation_count = max(0, self.violation_count - 1)
+            self.violation_count = max(0, self.violation_count - 2) # Recover faster (decrement by 2)
 
         status_text = "Status: Monitoring"
         status_color = (0, 255, 0)
