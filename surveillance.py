@@ -1,5 +1,6 @@
 import cv2
 import time
+import numpy as np
 from logger import ActivityLogger
 from ultralytics import YOLO
 from ai_assistant import SmartAssistant
@@ -36,8 +37,31 @@ class SurveillanceSystem:
         if frame is None:
             return frame, None
 
+        h_img, w_img = frame.shape[:2]
+        
+        # --- PHASE 0: Draw Forbidden Zone (ROI) ---
+        # Define a dynamic ROI (e.g., Right 25% of the screen)
+        # In a real app, this would be user-configurable
+        roi_points = np.array([
+            [int(w_img * 0.75), 0], 
+            [w_img, 0], 
+            [w_img, h_img], 
+            [int(w_img * 0.75), h_img]
+        ], np.int32)
+
+        # Draw transparent overlay for the zone
+        overlay = frame.copy()
+        cv2.fillPoly(overlay, [roi_points], (0, 0, 255))
+        cv2.addWeighted(overlay, 0.3, frame, 0.7, 0, frame)
+        
+        cv2.polylines(frame, [roi_points], True, (0, 0, 255), 2)
+        cv2.putText(frame, "RESTRICTED ZONE", (int(w_img * 0.76), 30), 
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
+
         self.frame_count += 1
         annotated_frame = frame.copy()
+        
+        # h_img, w_img calculation moved up for ROI logic
         
         # --- PHASE 1: Human Detection ---
         person_results = self.person_model(frame, classes=[0], stream=True, conf=0.5, verbose=False)
@@ -46,10 +70,16 @@ class SurveillanceSystem:
         for r in person_results:
             for box in r.boxes:
                 coords = list(map(int, box.xyxy[0]))
+                x1, y1, x2, y2 = coords
+                
+                # Filter out small detections (e.g. hands, arms) that are not full bodies
+                # Person must be at least 25% of screen height
+                if (y2 - y1) < (h_img * 0.25):
+                    continue
+
                 persons.append(coords)
                 
                 # Visual
-                x1, y1, x2, y2 = coords
                 cv2.rectangle(annotated_frame, (x1, y1), (x2, y2), (255, 255, 255), 2)
                 
 
@@ -66,11 +96,20 @@ class SurveillanceSystem:
                     if "hat" in cls_name.lower() or "helmet" in cls_name.lower():
                         helmets.append(list(map(int, box.xyxy[0])))
 
+
         # --- PHASE 4: Logic & Alerts ---
         violation_found = False
+        roi_violation = False
         
         for px1, py1, px2, py2 in persons:
+            # Check ROI Violation (based on feet position)
+            feet_point = (int((px1 + px2) / 2), py2)
+            if cv2.pointPolygonTest(roi_points, feet_point, False) >= 0:
+                roi_violation = True
+                cv2.circle(annotated_frame, feet_point, 5, (0, 0, 255), -1)
+
             has_helmet = False
+
             head_y_limit = py1 + (py2 - py1) // 3
             
             for hx1, hy1, hx2, hy2 in helmets:
@@ -92,29 +131,42 @@ class SurveillanceSystem:
                 cv2.rectangle(annotated_frame, (px1, py1), (px2, py2), (0, 0, 255), 3)
 
         # Violation Logic
-        # Violation Logic
-        if not persons:
+        
+        # Priority: ROI Violation > No Helmet
+        if roi_violation:
+            self.violation_count = min(30, self.violation_count + 2) # Fast increment
+            status_text = "ALERT: RESTRICTED ZONE"
+            status_color = (0, 0, 255)
+            
+        elif not persons:
             self.violation_count = 0
             
         elif violation_found:
             self.violation_count = min(30, self.violation_count + 1) # Cap at 30 to prevent stuck alerts
         else:
             self.violation_count = max(0, self.violation_count - 2) # Recover faster (decrement by 2)
-
+        
         status_text = "Status: Monitoring"
         status_color = (0, 255, 0)
 
-        if self.violation_count > self.alert_limit:
-            status_text = "ALERT: SAFETY VIOLATION"
+        if self.violation_count > self.alert_limit or roi_violation:
             status_color = (0, 0, 255)
             
+            if roi_violation:
+                status_text = "ALERT: RESTRICTED ZONE"
+                violation_type = "Restricted Zone Violation"
+            else:
+                status_text = "ALERT: SAFETY VIOLATION"
+                violation_type = "No Helmet Detected"
+
             # 1. Log to CSV
             if self.frame_count % 60 == 0:
-                self.logger.log(len(persons), "No Helmet Detected")
+                self.logger.log(len(persons), violation_type)
             
             # 2. TRIGGER GEMINI AI (Context-Aware Voice Warning)
             # We send the RAW frame (without boxes) so AI detects better
-            self.ai.analyze_scene(frame, trigger_reason="High Priority: Worker detected without helmet")
+            trigger_msg = f"High Priority: {violation_type}"
+            self.ai.analyze_scene(frame, trigger_reason=trigger_msg)
 
         # Complex Hazard Check (Routine Scan every 15 seconds)
         # This handles "Smoking", "Fire", "Blocked Path" which YOLO might miss
