@@ -1,0 +1,30 @@
+# System Specific
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Environment variables
+.env
+.env.*
+
+# Logs and Data
+logs/
+*.log
+*.csv
+recordings/
+
+# Virtual Environments
+venv/
+env/
+.venv/
+
+# IDE settings
+.vscode/
+.idea/
+
+# Models (Optional: Uncomment if you want to exclude large model files)
+# *.pt
+# *.onnx
+
+# Misc
+.DS_Store
