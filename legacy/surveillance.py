@@ -74,8 +74,11 @@ class SurveillanceSystem:
         person_results = self.person_model(frame, classes=[0], stream=True, conf=0.5, verbose=False)
         
         persons = [] 
+        person_confs = []
         for r in person_results:
             for box in r.boxes:
+                conf = float(box.conf[0])
+                person_confs.append(conf)
                 coords = list(map(int, box.xyxy[0]))
                 x1, y1, x2, y2 = coords
                 
@@ -95,6 +98,7 @@ class SurveillanceSystem:
 
         # --- PHASE 3: Safety Helmet Verification ---
         helmets = []
+        helmet_confs = []
         yolo_helmet_count = 0
         if self.ppe_active:
             # Balanced confidence for speed and accuracy
@@ -105,6 +109,7 @@ class SurveillanceSystem:
                     if "hat" in cls_name.lower() or "helmet" in cls_name.lower():
                         helmet_coords = list(map(int, box.xyxy[0]))
                         helmets.append(helmet_coords)
+                        helmet_confs.append(float(box.conf[0]))
                         yolo_helmet_count += 1
                         # Draw all detected helmets in yellow for debugging
                         hx1, hy1, hx2, hy2 = helmet_coords
@@ -163,6 +168,15 @@ class SurveillanceSystem:
         # Debug output
         if self.frame_count % 30 == 0:  # Print every 30 frames (~1 second)
             print(f"[DEBUG] Helmets: YOLO={yolo_helmet_count}, Color={color_helmet_count}, Total={len(helmets)}")
+            
+            if helmet_confs:
+                avg_conf = sum(helmet_confs) / len(helmet_confs)
+                print(f"        Helmet Model Accuracy: {avg_conf:.2%} (Range: {min(helmet_confs):.2%} - {max(helmet_confs):.2%})")
+            
+            if person_confs:
+                avg_p_conf = sum(person_confs) / len(person_confs)
+                print(f"        Person Model Accuracy: {avg_p_conf:.2%}")
+
             print(f"        Yellow contours found: {total_yellow_contours} (filtered to {color_helmet_count} helmets)")
             if color_helmet_count > 0 and yolo_helmet_count == 0:
                 print("  ⚠️  YOLO failed - Color detection active")

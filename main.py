@@ -1,47 +1,56 @@
+
 import cv2
-from camera import ThreadedCamera
-from surveillance import SurveillanceSystem
+import time
+import sys
+from src.core.camera import ThreadedCamera
+from src.core.surveillance import SurveillanceSystem
+from src.config.settings import Config
 
 def main():
-    # 5. Performance Optimization: Start Threaded Camera
-    camera = ThreadedCamera()
-    camera_stream = camera.start()
-    
-    if camera_stream is None:
-        print("Failed to start camera.")
-        return
+    print("Starting Industrial Monitoring System...")
+    print("Initializing components...")
 
-    system = SurveillanceSystem()
-    
-    print("Industrial Monitoring System Started...")
-    print("Press 'ESC' or 'q' to exit.")
+    # Initialize Camera
+    camera = ThreadedCamera(Config.CAMERA_SOURCE)
+    if not camera.start():
+        print("Error: Could not access camera.")
+        sys.exit(1)
+
+    # Initialize System
+    try:
+        system = SurveillanceSystem()
+    except Exception as e:
+        print(f"Critical Error during initialization: {e}")
+        camera.stop()
+        sys.exit(1)
+
+    print("System Active. Press 'Q' or 'ESC' to exit.")
 
     while True:
         try:
-            frame = camera_stream.get_frame()
+            frame = camera.get_frame()
             if frame is None:
                 continue
 
-            # Process frame (Detection)
-            # We ignore the second return value (mask) as we are using YOLO now
-            processed_frame, _ = system.process_frame(frame)
-            
-            # Show feeds
-            # Show feeds
-            if processed_frame is not None:
-                window_name = "Industrial Monitoring (YOLOv8)"
-                cv2.namedWindow(window_name, cv2.WINDOW_NORMAL)
-                cv2.imshow(window_name, processed_frame)
+            # Process
+            processed_frame = system.process_frame(frame)
 
-            key = cv2.waitKey(1)
-            if key == 27 or key == ord('q'):
+            # Display
+            cv2.imshow("Industrial Monitor", processed_frame)
+
+            # Input Handling
+            key = cv2.waitKey(1) & 0xFF
+            if key == ord('q') or key == 27: # ESC
                 break
                 
-        except AttributeError:
-            pass
         except KeyboardInterrupt:
             break
+        except Exception as e:
+            print(f"Runtime Error: {e}")
+            break
 
+    # Cleanup
+    print("Shutting down...")
     camera.stop()
     cv2.destroyAllWindows()
 

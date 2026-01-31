@@ -1,9 +1,5 @@
 opencv-python
-numpy
 ultralytics
-requests
-openai
-
-python-dotenv
 pyttsx3
-
+requests
+numpy
